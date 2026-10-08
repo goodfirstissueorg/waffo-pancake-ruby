@@ -1,0 +1,17 @@
+# One verified Waffo Pancake delivery. The unique delivery_id makes a redelivery a no-op.
+class WaffoWebhookEvent < ApplicationRecord
+  # Returns [event, created?]; two deliveries racing on the unique index share the one row.
+  def self.record(event)
+    attributes = {
+      event_type: event["eventType"].to_s,
+      mode: event["mode"].to_s,
+      order_id: event.dig("data", "orderId"),
+      payload: event
+    }
+    [ create!(delivery_id: event["id"].to_s, **attributes), true ]
+  rescue ActiveRecord::RecordNotUnique
+    [ find_by!(delivery_id: event["id"].to_s), false ]
+  end
+
+  def data = payload.fetch("data", {})
+end

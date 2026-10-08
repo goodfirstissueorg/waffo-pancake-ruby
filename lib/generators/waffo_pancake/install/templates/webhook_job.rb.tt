@@ -1,0 +1,25 @@
+# Handles one Waffo Pancake delivery (WaffoWebhooksController records it first). Event types:
+# https://docs.waffo.ai — Waffo::Pancake::Webhook::EVENT_TYPES lists them.
+class WaffoWebhookJob < ApplicationJob
+  retry_on Waffo::Pancake::Unavailable, wait: :polynomially_longer, attempts: 8
+
+  def perform(event)
+    return if event.processed_at
+
+    case event.event_type
+    when "subscription.activated", "subscription.renewed", "subscription.recovered", "subscription.uncanceled"
+      # Grant access until event.data["currentPeriodEnd"]. To read the order as Waffo has it
+      # now, regardless of delivery order: Waffo::Pancake.client.subscription_order(event.order_id)
+    when "subscription.canceling"
+      # Access continues until event.data["currentPeriodEnd"]; no renewal follows.
+    when "subscription.canceled"
+      # Revoke access.
+    when "subscription.past_due"
+      # The renewal failed; the payment channel retries once, usually the next day.
+    when "refund.succeeded"
+      # Compare event.data["refundedAmount"] with event.data["originalChargedAmount"].
+    end
+
+    event.update!(processed_at: Time.current)
+  end
+end

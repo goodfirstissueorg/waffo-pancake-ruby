@@ -1,0 +1,16 @@
+class CreateWaffoWebhookEvents < ActiveRecord::Migration<%= migration_version %>
+  def change
+    create_table :waffo_webhook_events do |t|
+      t.string :delivery_id, null: false
+      t.string :event_type, null: false
+      t.string :mode, null: false
+      t.string :order_id
+      t.json :payload, null: false
+      t.datetime :processed_at
+      t.timestamps
+    end
+
+    add_index :waffo_webhook_events, :delivery_id, unique: true
+    add_index :waffo_webhook_events, :order_id
+  end
+end

@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+# railties ships a Minitest plugin that loads ActiveSupport; the core suite must run without it.
+ENV["MT_NO_PLUGINS"] = "1"
+
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "waffo/pancake"
 require "minitest/autorun"

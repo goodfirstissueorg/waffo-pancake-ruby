@@ -23,7 +23,7 @@ Gem::Specification.new do |spec|
     "rubygems_mfa_required" => "true"
   }
 
-  spec.files = Dir["lib/**/*.rb", "README.md", "CHANGELOG.md", "LICENSE"]
+  spec.files = Dir["lib/**/*", "README.md", "CHANGELOG.md", "LICENSE"].select { |path| File.file?(path) }
   spec.require_paths = ["lib"]
 
   # base64 left the default gems in Ruby 3.4.

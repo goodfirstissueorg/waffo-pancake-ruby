@@ -44,11 +44,14 @@ module Waffo
         Base64.strict_encode64(private_key.sign(OpenSSL::Digest::SHA256.new, canonical))
       end
 
-      # `transport` replaces the HTTP call: it takes the URI, the headers and the JSON body
-      # and answers `[status, body]` (status nil when there was no answer). `logger` gets one
-      # info line per request; neither the body nor the key is ever logged.
-      def initialize(merchant_id: ENV["WAFFO_MERCHANT_ID"], private_key: ENV["WAFFO_PRIVATE_KEY"],
-                     base_url: DEFAULT_BASE_URL, timeout: DEFAULT_TIMEOUT, logger: nil, transport: nil)
+      # Every argument defaults to Waffo::Pancake.configuration (itself defaulting to the
+      # WAFFO_* environment variables). `transport` replaces the HTTP call: it takes the URI,
+      # the headers and the JSON body and answers `[status, body]` (status nil when there was
+      # no answer). `logger` gets one info line per request and `instrumenter` one
+      # `request.waffo_pancake` event; neither ever sees the body or the key.
+      def initialize(config: Pancake.configuration, merchant_id: config.merchant_id, private_key: config.private_key,
+                     base_url: config.base_url, timeout: config.timeout, logger: config.logger,
+                     instrumenter: config.instrumenter, transport: nil)
         raise ConfigurationError, "Missing merchant_id (WAFFO_MERCHANT_ID)" if blank?(merchant_id)
         raise ConfigurationError, "Missing private_key (WAFFO_PRIVATE_KEY)" if blank?(private_key)
 
@@ -57,6 +60,7 @@ module Waffo
         @base_url = base_url.to_s.chomp("/")
         @timeout = timeout
         @logger = logger
+        @instrumenter = instrumenter
         @transport = transport || method(:http_post)
       end
 
@@ -174,7 +178,9 @@ module Waffo
           }
 
           started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          status, body = call_transport(URI("#{@base_url}#{path}"), headers, json)
+          status, body = instrument("request.waffo_pancake", method: "POST", path: path) do |payload|
+            call_transport(URI("#{@base_url}#{path}"), headers, json).tap { |answer| payload[:status] = answer.first }
+          end
           elapsed = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(2)
           @logger&.info("[Waffo] POST #{path} status=#{status.inspect} in #{elapsed}s")
 
@@ -184,6 +190,12 @@ module Waffo
           raise_for(status, {}, path, "non-JSON response") unless envelope.is_a?(Hash)
 
           [status, envelope]
+        end
+
+        def instrument(name, payload, &block)
+          return yield(payload) unless @instrumenter
+
+          @instrumenter.instrument(name, payload, &block)
         end
 
         def call_transport(uri, headers, json)

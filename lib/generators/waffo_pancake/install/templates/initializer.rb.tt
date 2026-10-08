@@ -1,0 +1,17 @@
+# Waffo Pancake (the waffo-pancake gem). Settings are read in this order, the last one winning:
+# WAFFO_* environment variables, credentials.waffo, config.waffo_pancake, then this block.
+#
+#   # bin/rails credentials:edit
+#   waffo:
+#     merchant_id: MER_...
+#     private_key: "-----BEGIN PRIVATE KEY-----\n..."   # PEM, or bare base64
+#     store_id: STO_...
+#     environment: test                                 # or prod
+#
+# Waffo::Pancake.client is a client built from these settings; webhook deliveries are verified
+# by Waffo::Pancake::WebhookController. Requests are reported as `request.waffo_pancake` and
+# webhook checks as `verify_webhook.waffo_pancake` ActiveSupport::Notifications events.
+Waffo::Pancake.configure do |config|
+  # config.environment = Rails.env.production? ? "prod" : "test"
+  # config.timeout = 15
+end

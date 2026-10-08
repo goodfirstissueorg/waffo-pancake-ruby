@@ -1,0 +1,16 @@
+# Receives Waffo Pancake webhooks. The included concern has already verified the signature,
+# the environment and the store before `create` runs; `waffo_event` is the parsed delivery.
+class WaffoWebhooksController < ActionController::Base
+  include Waffo::Pancake::WebhookController
+
+  def create
+<% if events_table? -%>
+    event, created = WaffoWebhookEvent.record(waffo_event)
+    WaffoWebhookJob.perform_later(event) if created
+<% else -%>
+    # A retry redelivers the same waffo_event["id"]; handle each id once.
+    Rails.logger.info("Waffo #{waffo_event["eventType"]} #{waffo_event["id"]}")
+<% end -%>
+    head :ok
+  end
+end
