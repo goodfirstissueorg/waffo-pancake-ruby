@@ -28,6 +28,9 @@ so no API key is stored anywhere.
    git push origin v0.1.0
    ```
 
+   Or, without a local tag: Actions → Release → **Run workflow** on `main`. `rake release` then
+   creates and pushes the tag itself.
+
 3. The Release workflow runs the tests, checks that the tag matches `VERSION`, builds the gem
    and pushes it. It appears at https://rubygems.org/gems/waffo-pancake a minute later.
 

@@ -1,10 +1,12 @@
 name: Release
 
-# Push a tag that matches lib/waffo/pancake/version.rb (v0.1.0) to publish. RubyGems trusted
-# publishing must be set up for this repository and workflow first (README → Development).
+# Publishes the version in lib/waffo/pancake/version.rb to RubyGems through trusted publishing.
+# Either push a tag that matches it (v0.2.0), or run this workflow by hand on main: then
+# `rake release` creates and pushes the tag itself.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 jobs:
   release:
@@ -21,5 +23,6 @@ jobs:
           bundler-cache: true
       - run: bundle exec rake test
       - name: Check the tag matches the version
+        if: github.ref_type == 'tag'
         run: test "v$(ruby -Ilib -rwaffo/pancake/version -e 'print Waffo::Pancake::VERSION')" = "$GITHUB_REF_NAME"
       - uses: rubygems/release-gem@v1
