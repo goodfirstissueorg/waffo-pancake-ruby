@@ -145,7 +145,8 @@ bundle install
 bundle exec rake test
 ```
 
-Releases are published to RubyGems by the `Release` workflow when a `v*` tag is pushed. It uses
+Releases are published to RubyGems by the `Release` workflow when a `v*` tag is pushed (see
+[RELEASING.md](RELEASING.md)). It uses
 [trusted publishing](https://guides.rubygems.org/trusted-publishing/), so no API key is stored.
 
 ## License
