@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- `Client#subscription_order` also returns the order's current product as `productId`, read
+  from `subscriptionProduct { id }`, so a plan change to another product can be detected.
+
 ## 0.2.0
 
 - `Waffo::Pancake.configure` / `.configuration`: process-wide settings that start from the

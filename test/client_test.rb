@@ -76,9 +76,15 @@ class ClientTest < Minitest::Test
   end
 
   def test_subscription_order_reads_graphql_and_is_nil_when_unknown
-    client, requests = client_with(ok(subscriptionOrder: { id: "ORD_1", status: "active" }), ok(subscriptionOrder: nil))
+    client, requests = client_with(
+      ok(subscriptionOrder: { id: "ORD_1", status: "active", subscriptionProduct: { id: "PROD_1" } }),
+      ok(subscriptionOrder: nil)
+    )
 
-    assert_equal "active", client.subscription_order("ORD_1")["status"]
+    order = client.subscription_order("ORD_1")
+    assert_equal "active", order["status"]
+    assert_equal "PROD_1", order["productId"]
+    assert_match(/subscriptionProduct \{ id \}/, JSON.parse(requests.first[:body])["query"])
     assert_nil client.subscription_order("ORD_2")
     assert_equal({ "id" => "ORD_1" }, JSON.parse(requests.first[:body])["variables"])
   end

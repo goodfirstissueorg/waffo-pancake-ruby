@@ -30,6 +30,7 @@ module Waffo
           subscriptionOrder(id: $id) {
             id storeId status testMode buyerEmail merchantProvidedBuyerIdentity orderMerchantExternalId
             billingPeriod currentPeriodStart currentPeriodEnd canceledAt
+            subscriptionProduct { id }
           }
         }
       GRAPHQL
@@ -109,9 +110,11 @@ module Waffo
         action("/v1/actions/onetime-order/cancel-order", { order_id: order_id })
       end
 
-      # Nil when Waffo knows no such order.
+      # Nil when Waffo knows no such order. `productId` is the order's current product, so a plan
+      # change to another product can be told apart.
       def subscription_order(order_id)
-        graphql(SUBSCRIPTION_ORDER_QUERY, id: order_id)&.dig("subscriptionOrder")
+        order = graphql(SUBSCRIPTION_ORDER_QUERY, id: order_id)&.dig("subscriptionOrder")
+        order && order.merge("productId" => order.dig("subscriptionProduct", "id"))
       end
 
       # --- Products ----------------------------------------------------------------------
