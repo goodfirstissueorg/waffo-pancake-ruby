@@ -46,7 +46,8 @@ module Waffo
         { "CONTENT_TYPE" => "application/json", Webhook::SIGNATURE_HEADER => waffo_webhook_signature(body, **options) }
       end
 
-      # A webhook envelope in Waffo's shape. `mode` and `store_id` default to the configuration.
+      # A webhook envelope in Waffo's shape, as a plain Hash to JSON.generate and sign.
+      # `mode` and `store_id` default to the configuration.
       def waffo_webhook_event(event_type, data: {}, id: SecureRandom.uuid, mode: nil, store_id: nil)
         config = Waffo::Pancake.configuration
         {
@@ -70,17 +71,31 @@ module Waffo
         Waffo::Pancake.client = previous
       end
 
-      # Stands in for Waffo::Pancake::Client. Answers subscription_order from `orders`, moves
-      # an order's status on cancel / reactivate the way Waffo does, and records every call
-      # in `calls` as [method, arguments]. Set `fail_with` to an error to make calls raise it.
+      # Stands in for Waffo::Pancake::Client. Answers subscription_order from `orders` and
+      # webhook_deliveries from `deliveries`, moves an order's status on cancel / reactivate the
+      # way Waffo does, and records every call in `calls` as [method, arguments]. Set
+      # `fail_with` to an error to make calls raise it.
       class FakeClient
         attr_reader :orders, :calls
-        attr_accessor :fail_with, :checkout_url
+        attr_accessor :fail_with, :checkout_url, :portal_url, :deliveries
 
         def initialize(orders = {})
           @orders = orders.transform_keys(&:to_s)
           @calls = []
           @checkout_url = "https://pancake.waffo.ai/store/test/checkout/cs_test"
+          @portal_url = "https://pancake.waffo.ai/consumer/portal/store/STO_test"
+          @deliveries = []
+        end
+
+        def create_customer_portal_link(**params)
+          record(:create_customer_portal_link, params)
+          { "portalUrl" => "#{portal_url}#token=test_token", "expiresAt" => (Time.now + 900).utc.iso8601 }
+        end
+
+        def webhook_deliveries(**params)
+          record(:webhook_deliveries, params)
+          status = params[:status]&.to_s
+          status ? deliveries.select { |delivery| delivery["status"] == status } : deliveries.dup
         end
 
         def subscription_order(order_id)

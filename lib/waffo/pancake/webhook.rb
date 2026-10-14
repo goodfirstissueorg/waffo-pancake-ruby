@@ -10,7 +10,8 @@ module Waffo
     #
     #   event = Waffo::Pancake::Webhook.verify(request.raw_post, request.headers["X-Waffo-Signature"],
     #                                          environment: "prod")
-    #   event["eventType"] # => "subscription.activated"
+    #   event["eventType"]        # => "subscription.activated"
+    #   event.data.period_number  # => 1
     #
     # The header is `t=<unix ms>,v1=<base64>`: an RSA-SHA256 signature over "<t>.<raw body>".
     # Pass the body exactly as received; a re-serialized JSON will not verify.
@@ -24,7 +25,7 @@ module Waffo
 
       ENVIRONMENTS = %w[test prod].freeze
 
-      # Waffo's platform keys, as embedded in @waffo/pancake-ts 0.25.0.
+      # Waffo's platform keys, as embedded in @waffo/pancake-ts 0.26.0.
       PUBLIC_KEYS = {
         "test" => <<~PEM,
           -----BEGIN PUBLIC KEY-----
@@ -60,7 +61,7 @@ module Waffo
 
       module_function
 
-      # Returns the parsed event. Raises InvalidSignature.
+      # Returns the parsed event, a Webhook::Event (a Hash). Raises InvalidSignature.
       #
       # environment: "test" or "prod" uses that environment's key; nil tries prod, then test.
       # public_key:  a key to use instead (skips the lookup and `environment`).
@@ -74,7 +75,8 @@ module Waffo
         keys = public_key ? [Keys.public_key(public_key)] : keys_for(environment)
         raise InvalidSignature, "Invalid webhook signature" unless keys.any? { |key| valid?(key, signature, input) }
 
-        JSON.parse(payload.to_s)
+        event = JSON.parse(payload.to_s)
+        event.is_a?(Hash) ? Event.wrap(event) : event
       rescue JSON::ParserError
         raise InvalidSignature, "Webhook body is not JSON"
       end

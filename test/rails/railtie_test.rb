@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "rails_helper"
+require "minitest/mock"
 
 class RailtieTest < Minitest::Test
   def config = Waffo::Pancake.configuration
@@ -35,5 +36,21 @@ class RailtieTest < Minitest::Test
     assert_equal({ method: "POST", path: "/v1/actions/subscription-order/cancel-order", status: 503 }, events.last)
   ensure
     ActiveSupport::Notifications.unsubscribe(subscriber)
+  end
+
+  def test_deprecated_webhook_fields_are_reported_through_the_rails_deprecator
+    deprecator = Waffo::Pancake::Railtie.deprecator
+
+    assert_same deprecator, config.deprecator
+    assert_same deprecator, Rails.application.deprecators[:waffo_pancake]
+
+    event = Waffo::Pancake::Webhook::Event.wrap({ "eventType" => "order.completed", "data" => { "amount" => "1.00" } })
+    message = nil
+    deprecator.stub(:warn, ->(text, *) { message = text }) { event.data["amount"] }
+    assert_match(/read data\["chargedAmount"\]/, message)
+  end
+
+  def test_token_redirects_are_filtered
+    assert_includes Rails.application.config.filter_redirect, "#token="
   end
 end

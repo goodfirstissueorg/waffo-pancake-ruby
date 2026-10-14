@@ -37,4 +37,13 @@ class TestHelpersTest < Minitest::Test
     assert_raises(Waffo::Pancake::Unavailable) { client.create_authenticated_checkout(product_id: "PROD_1") }
     assert_equal [[:create_authenticated_checkout, { product_id: "PROD_1" }]], client.calls
   end
+
+  def test_fake_client_answers_portal_links_and_deliveries
+    client = FakeClient.new
+    client.deliveries = [{ "id" => "dlv_1", "status" => "failed" }, { "id" => "dlv_2", "status" => "success" }]
+
+    assert_match(/#token=test_token\z/, client.create_customer_portal_link(buyer_identity: "u")["portalUrl"])
+    assert_equal ["dlv_1"], client.webhook_deliveries(status: :failed).map { |delivery| delivery["id"] }
+    assert_equal 2, client.webhook_deliveries.size
+  end
 end

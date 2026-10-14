@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+- Webhook amount fields (Waffo, 2026-09-20 to 2026-09-22):
+  - `Webhook.verify` and `Waffo::Pancake.verify_webhook` return a `Webhook::Event`, a Hash
+    subclass, so code that reads it as a Hash keeps working. `Webhook::Event.wrap` makes one from
+    a stored payload (Hash or JSON).
+  - `event.data` readers for the new fields: `charged_amount`, `refunded_amount`,
+    `original_charged_amount`, `list_price`, `original_payment`, `plan_price`, `price`,
+    `period_number`, `first_period?`, `renewal?`.
+  - Reading a deprecated field (`amount`, `total`, `subtotal`, `taxAmount`, `taxRate`, `taxName`)
+    with `[]`, `fetch` or `dig` reports a deprecation warning naming its replacement for that
+    event type. `config.deprecator` chooses where it goes: a once-per-message `Kernel#warn` by
+    default, `Rails.application.deprecators[:waffo_pancake]` in Rails, nil for none.
+  - `Webhook::DEPRECATED_FIELDS`, `PAYMENT_EVENT_TYPES`, `REFUND_EVENT_TYPES` and
+    `Webhook.family`.
+- Customer portal sign-in without an email code: `Client#create_customer_portal_link`
+  (`issue-session-token` with `purpose: "portal"`), `issue_session_token(purpose:)`, and the
+  `Waffo::Pancake::CustomerPortalController` Rails concern, which answers with a 302 and
+  `Cache-Control: no-store` / `Referrer-Policy: no-referrer`. The Railtie adds `#token=` to
+  `filter_redirect`, so these URLs stay out of the request log.
+- Webhook delivery records: `Client#webhook_deliveries` and `#webhook_deliveries_count`, with
+  `status:`, `event_type:`, `filter:`, `limit:` and `offset:`. Waffo has no redelivery API;
+  run your handler on `Webhook::Event.wrap(delivery["payload"])` instead.
+- `Client.new(store_id:)`, defaulting to the configured store, for the calls above.
+- `TestHelpers::FakeClient#create_customer_portal_link` and `#webhook_deliveries`.
+- The generated `WaffoWebhookEvent#data` and `#waffo_event` wrap the stored payload; the
+  generated job reads the new amount fields.
+
 ## 0.2.1
 
 - `Client#subscription_order` also returns the order's current product as `productId`, read

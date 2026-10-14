@@ -27,7 +27,10 @@ class InstallGeneratorTest < Rails::Generators::TestCase
       assert_match(/ActiveRecord::Migration\[\d+\.\d+\]/, migration)
       assert_match(/add_index :waffo_webhook_events, :delivery_id, unique: true/, migration)
     end
-    assert_file "app/models/waffo_webhook_event.rb", /def self\.record\(event\)/
+    assert_file "app/models/waffo_webhook_event.rb" do |model|
+      assert_match(/def self\.record\(event\)/, model)
+      assert_match(/Waffo::Pancake::Webhook::Event\.wrap\(payload\)/, model)
+    end
     assert_file "app/jobs/waffo_webhook_job.rb", /retry_on Waffo::Pancake::Unavailable/
   end
 

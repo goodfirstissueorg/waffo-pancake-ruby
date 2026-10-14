@@ -68,6 +68,34 @@ client.create_checkout_session(product_id: "PROD_...", currency: "USD")
 Top-level keyword arguments may be snake_case and are sent as camelCase. Nested hashes
 (`metadata`, `prices`, `billing_detail`'s fields) are sent exactly as given.
 
+## Customer portal
+
+A customer who is signed in on your site can enter the store's customer portal without an email
+code. Use the `buyer_identity` you gave at authenticated checkout, taken from your own session.
+
+```ruby
+link = client.create_customer_portal_link(buyer_identity: current_user.id)  # store_id: defaults to WAFFO_STORE_ID
+# => {"portalUrl" => "https://pancake.waffo.ai/consumer/portal/store/STO_...#token=...", "expiresAt" => "..."}
+```
+
+The URL is a bearer credential: make a new one on each click, answer with a 302 and
+`Cache-Control: no-store` / `Referrer-Policy: no-referrer`, and never log, cache or email it.
+The portal opens on the API key's environment. In Rails, the concern does all of that:
+
+```ruby
+class WaffoPortalController < ApplicationController
+  include Waffo::Pancake::CustomerPortalController
+  before_action :authenticate_user!
+
+  def show
+    redirect_to_waffo_customer_portal(buyer_identity: current_user.id)  # 502 if Waffo fails
+  end
+end
+```
+
+Link to that route with a plain `<a>`, so nothing prefetches it. Set a Website in the store
+settings: the portal's return button links only there.
+
 ## Subscriptions
 
 ```ruby
@@ -112,9 +140,10 @@ class WaffoWebhooksController < ActionController::Base
       request.headers["X-Waffo-Signature"],
       environment: "prod"            # or "test"; omit to try prod, then test
     )
-    # Deduplicate on event["id"]: a retry redelivers the same id.
-    case event["eventType"]
-    when "subscription.activated", "subscription.renewed" then # grant access until data.currentPeriodEnd
+    # Deduplicate on event.id: a retry redelivers the same id.
+    case event.event_type
+    when "order.completed" then                                 # record event.data.charged_amount
+    when "subscription.activated", "subscription.renewed" then # grant access until data["currentPeriodEnd"]
     when "subscription.canceled" then                           # revoke access
     end
     head :ok
@@ -131,12 +160,68 @@ both), or pass `public_key:`. Timestamps may be up to 45 minutes old and 1 minut
 
 `Waffo::Pancake::Webhook::EVENT_TYPES` lists the event types.
 
+### Amount fields
+
+`verify` returns a `Waffo::Pancake::Webhook::Event`, a Hash with readers. Its `data` reads
+the amount fields by what they describe:
+
+| Reader | Field | Events |
+|---|---|---|
+| `charged_amount` | `chargedAmount` | Payment (`order.completed`, `subscription.payment_succeeded`): what the buyer was actually charged, after prorated credits, trials and zero-amount card checks |
+| `list_price` | `listPrice` | Payment: the list price behind the charge (`total`, `subtotal`, `taxAmount`, `taxRate`, `taxName`) |
+| `refunded_amount` | `refundedAmount` | `refund.*`: what this refund returned |
+| `original_charged_amount` | `originalChargedAmount` | `refund.*`: what the refunded payment actually collected, the most a refund can reach |
+| `original_payment` | `originalPayment` | `refund.*`: the refunded payment's list price |
+| `plan_price` | `planPrice` | Other `subscription.*` events: the plan's price for the current period |
+| `period_number`, `first_period?`, `renewal?` | `periodNumber` | Subscription events, `subscription.payment_succeeded` and subscription refunds: 1 for the first period, N for the Nth renewal |
+
+`chargedAmount`, `refundedAmount` and `originalChargedAmount` are absent (nil) when the payment
+channel reported no amount. `periodNumber` counts failed charges too, is `0` before a scheduled
+plan change takes effect, and is not a deduplication key.
+
+`amount`, `total`, `subtotal`, `taxAmount`, `taxRate` and `taxName` are deprecated: one name meant
+a different amount per event family. Waffo sends them until its next major API version, not
+before 2027-09-20. Since 2026-09-21, `amount` on payment events is the charged amount, so a check
+such as `amount == total` fails there. Reading one of them with `[]`, `fetch` or `dig` still
+returns the value, and reports the field to read instead for that event type:
+
+```
+DEPRECATION WARNING: Waffo webhook data["amount"] is deprecated on refund.succeeded; read data["refundedAmount"] instead. ...
+```
+
+Outside Rails each message is printed once per process with `Kernel#warn`. In Rails it goes to
+`Rails.application.deprecators[:waffo_pancake]`, so `config.active_support.deprecation` applies
+(`:raise` in tests finds every place to change). Set `config.deprecator` to any object answering
+`warn(message, callstack)`, or to nil to turn the warnings off. A stored payload (or one that went
+through a job) is a plain Hash again: `Waffo::Pancake::Webhook::Event.wrap(payload)` brings the
+readers and warnings back.
+
+### Delivery records
+
+```ruby
+client.webhook_deliveries(status: :failed, limit: 20)  # store_id: defaults to WAFFO_STORE_ID
+# => [{"id" => ..., "eventType" => ..., "status" => "failed", "httpStatus" => 500, "attemptCount" => 4,
+#      "payload" => ..., "responseBody" => ..., "lastAttemptedAt" => ..., ...}]
+client.webhook_deliveries_count(status: :failed)
+client.webhook_deliveries(event_type: "refund.succeeded", filter: { createdAt: { gte: 1.week.ago } }, offset: 20)
+```
+
+Waffo retries a delivery 3 times and has no manual redelivery. To process a failed one again,
+run your own handler on its payload:
+
+```ruby
+client.webhook_deliveries(status: :failed).each do |delivery|
+  HandleWaffoEventJob.perform_later(Waffo::Pancake::Webhook::Event.wrap(delivery["payload"]))
+end
+```
+
 ## Rails
 
 Inside a Rails app the gem configures itself. Settings are read in this order, the last one
 winning: `WAFFO_*` environment variables, `credentials.waffo`, `config.waffo_pancake`, then
-`Waffo::Pancake.configure` in an initializer. The logger is `Rails.logger`, and `private_key`
-is added to `filter_parameters`.
+`Waffo::Pancake.configure` in an initializer. The logger is `Rails.logger`, `private_key`
+is added to `filter_parameters`, and redirects to a URL with `#token=` (authenticated checkout,
+customer portal) to `filter_redirect`.
 
 ```yaml
 # bin/rails credentials:edit
@@ -165,7 +250,7 @@ class WaffoWebhooksController < ActionController::Base
   include Waffo::Pancake::WebhookController
 
   def create
-    HandleWaffoEventJob.perform_later(waffo_event)   # verified, parsed delivery
+    HandleWaffoEventJob.perform_later(waffo_event)   # verified Webhook::Event; wrap it again in the job
     head :ok
   end
 end

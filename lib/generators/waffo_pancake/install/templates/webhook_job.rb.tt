@@ -6,7 +6,13 @@ class WaffoWebhookJob < ApplicationJob
   def perform(event)
     return if event.processed_at
 
+    # Amounts: event.data.charged_amount on payment events (what the buyer was actually charged,
+    # after credits and trials), event.data.refunded_amount on refunds, event.data.plan_price on
+    # subscription events. data["amount"] / ["total"] / ["tax*"] are deprecated.
     case event.event_type
+    when "order.completed", "subscription.payment_succeeded"
+      # Record the receipt: event.data.charged_amount. event.data.first_period? tells the first
+      # charge of a subscription from a renewal (event.data.period_number).
     when "subscription.activated", "subscription.renewed", "subscription.recovered", "subscription.uncanceled"
       # Grant access until event.data["currentPeriodEnd"]. To read the order as Waffo has it
       # now, regardless of delivery order: Waffo::Pancake.client.subscription_order(event.order_id)
@@ -17,7 +23,7 @@ class WaffoWebhookJob < ApplicationJob
     when "subscription.past_due"
       # The renewal failed; the payment channel retries once, usually the next day.
     when "refund.succeeded"
-      # Compare event.data["refundedAmount"] with event.data["originalChargedAmount"].
+      # event.data.refunded_amount, out of event.data.original_charged_amount actually collected.
     end
 
     event.update!(processed_at: Time.current)

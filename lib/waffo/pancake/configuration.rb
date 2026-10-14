@@ -18,6 +18,10 @@ module Waffo
       # Anything answering `instrument(name, payload) { |payload| ... }`. Defaults to
       # ActiveSupport::Notifications when it is loaded; nil turns instrumentation off.
       attr_writer :instrumenter
+      # Anything answering `warn(message, callstack)` hears about deprecated fields being read:
+      # Waffo::Pancake::Deprecation.default (a once-per-message Kernel#warn) unless set, the
+      # gem's ActiveSupport::Deprecation inside Rails; nil stays silent.
+      attr_writer :deprecator
 
       # "test" or "prod": which platform key verifies webhooks, and which deliveries the Rails
       # webhook concern accepts. nil tries prod, then test, and accepts both.
@@ -39,6 +43,7 @@ module Waffo
         @webhook_tolerance = Webhook::DEFAULT_TOLERANCE
         @webhook_future_tolerance = Webhook::DEFAULT_FUTURE_TOLERANCE
         @instrumenter = :default
+        @deprecator = :default
       end
 
       def environment=(value)
@@ -55,6 +60,10 @@ module Waffo
         return @instrumenter unless @instrumenter == :default
 
         defined?(::ActiveSupport::Notifications) ? ::ActiveSupport::Notifications : nil
+      end
+
+      def deprecator
+        @deprecator == :default ? Deprecation.default : @deprecator
       end
 
       # What a client needs; a store id is only checked by the webhook concern.

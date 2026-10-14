@@ -13,5 +13,9 @@ class WaffoWebhookEvent < ApplicationRecord
     [ find_by!(delivery_id: event["id"].to_s), false ]
   end
 
-  def data = payload.fetch("data", {})
+  # The stored payload as Waffo::Pancake::Webhook::Event: readers for the amount fields, and a
+  # deprecation warning when a field Waffo has deprecated is read.
+  def waffo_event = Waffo::Pancake::Webhook::Event.wrap(payload)
+
+  def data = waffo_event.data
 end

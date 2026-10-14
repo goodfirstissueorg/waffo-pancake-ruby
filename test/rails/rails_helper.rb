@@ -40,6 +40,7 @@ RailsTest::Application.initialize!
 
 RailsTest::Application.routes.draw do
   post "webhooks/waffo", to: "waffo_webhooks#create"
+  get "portal", to: "waffo_portal#show"
 end
 
 class WaffoWebhooksController < ActionController::Base
@@ -47,5 +48,14 @@ class WaffoWebhooksController < ActionController::Base
 
   def create
     render json: { id: waffo_event["id"], type: waffo_event["eventType"], params: params.to_unsafe_h.keys.sort }
+  end
+end
+
+class WaffoPortalController < ActionController::Base
+  include Waffo::Pancake::CustomerPortalController
+
+  # Stands in for the app's own session.
+  def show
+    redirect_to_waffo_customer_portal(buyer_identity: "user-from-session")
   end
 end
