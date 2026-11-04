@@ -2,10 +2,17 @@
 
 require "base64"
 require "json"
-require "net/http"
 require "openssl"
 require "time"
-require "uri"
+
+require_relative "connection"
+require_relative "requests"
+require_relative "api/customer_actions"
+require_relative "api/store_actions"
+require_relative "api/product_actions"
+require_relative "api/promotion_actions"
+require_relative "api/queries"
+require_relative "customer_session"
 
 module Waffo
   module Pancake
@@ -17,14 +24,19 @@ module Waffo
     #   client.cancel_subscription("ORD_...") # => {"orderId" => "ORD_...", "status" => "canceling"}
     #
     # Parameters may be given in snake_case; top-level keys are sent in camelCase. Nested
-    # hashes (metadata, prices, billing details) are sent exactly as given.
+    # hashes (metadata, prices, billing details) are sent exactly as given. Every action takes
+    # `idempotency_key:`. Routes that do not take an API key are reached through #customer.
     class Client
+      include Requests
+      include API::CustomerActions
+      include API::StoreActions
+      include API::ProductActions
+      include API::PromotionActions
+      include API::Queries
+
       DEFAULT_BASE_URL = "https://api.waffo.ai"
       DEFAULT_TIMEOUT = 15
-
-      NETWORK_ERRORS = [
-        Timeout::Error, SocketError, SystemCallError, IOError, OpenSSL::SSL::SSLError, Net::HTTPBadResponse
-      ].freeze
+      NETWORK_ERRORS = Connection::NETWORK_ERRORS
 
       SUBSCRIPTION_ORDER_QUERY = <<~GRAPHQL
         query ($id: String!) {
@@ -40,7 +52,7 @@ module Waffo
                                 "attemptCount lastAttemptedAt createdAt"
       WEBHOOK_DELIVERY_STATUSES = %w[pending success failed].freeze
 
-      attr_reader :merchant_id, :base_url, :store_id
+      attr_reader :merchant_id, :base_url, :store_id, :environment
 
       # The canonical request the gateway checks `X-Signature` against: method, path,
       # timestamp (seconds) and the base64 SHA-256 of the body, one per line.
@@ -52,50 +64,72 @@ module Waffo
 
       # Every argument defaults to Waffo::Pancake.configuration (itself defaulting to the
       # WAFFO_* environment variables). `transport` replaces the HTTP call: it takes the URI,
-      # the headers and the JSON body and answers `[status, body]` (status nil when there was
-      # no answer). `logger` gets one info line per request and `instrumenter` one
-      # `request.waffo_pancake` event; neither ever sees the body or the key.
+      # the headers and the JSON body and answers `[status, body]` or `[status, body, headers]`
+      # (status nil when there was no answer). `logger` gets one info line per request and
+      # `instrumenter` one `request.waffo_pancake` event; neither ever sees the body or the key.
+      #
+      # The key's environment cannot be read from the key, so `environment` only tells #customer
+      # and create_authenticated_plan_change which one to use.
       def initialize(config: Pancake.configuration, merchant_id: config.merchant_id, private_key: config.private_key,
-                     store_id: config.store_id, base_url: config.base_url, timeout: config.timeout, logger: config.logger,
-                     instrumenter: config.instrumenter, transport: nil)
+                     store_id: config.store_id, environment: config.environment, base_url: config.base_url,
+                     timeout: config.timeout, logger: config.logger, instrumenter: config.instrumenter, transport: nil)
         raise ConfigurationError, "Missing merchant_id (WAFFO_MERCHANT_ID)" if blank?(merchant_id)
         raise ConfigurationError, "Missing private_key (WAFFO_PRIVATE_KEY)" if blank?(private_key)
 
         @merchant_id = merchant_id
         @store_id = blank?(store_id) ? nil : store_id
+        @environment = blank?(environment) ? nil : Requests.environment!(environment)
         @private_key = Keys.private_key(private_key)
         @base_url = base_url.to_s.chomp("/")
-        @timeout = timeout
-        @logger = logger
-        @instrumenter = instrumenter
-        @transport = transport || method(:http_post)
+        @connection = Connection.new(base_url: @base_url, timeout: timeout, logger: logger, instrumenter: instrumenter,
+                                     transport: transport)
+      end
+
+      def inspect = "#<#{self.class} merchant_id=#{@merchant_id.inspect} environment=#{@environment.inspect}>"
+
+      # The same connection, authenticated as a customer with a token from issue_session_token.
+      def customer(token, environment: @environment)
+        CustomerSession.new(token: token, environment: environment, connection: @connection)
       end
 
       # --- Checkout ----------------------------------------------------------------------
 
       # `purpose: "portal"` signs the customer into the store's customer portal instead; see
       # create_customer_portal_link.
-      def issue_session_token(buyer_identity:, store_id: nil, product_id: nil, purpose: nil)
+      def issue_session_token(buyer_identity:, store_id: nil, product_id: nil, purpose: nil, idempotency_key: nil)
         raise ArgumentError, "store_id or product_id is required" if store_id.nil? && product_id.nil?
 
-        action("/v1/actions/auth/issue-session-token",
-               { buyer_identity: buyer_identity, store_id: store_id, product_id: product_id, purpose: purpose })
-      end
-
-      # Anonymous checkout: the buyer fills everything in on the page.
-      # Returns {"sessionId", "checkoutUrl", "expiresAt"}.
-      def create_checkout_session(product_id:, currency:, **params)
-        action("/v1/actions/checkout/create-session", { product_id: product_id, currency: currency, **params })
+        action("/v1/actions/auth/issue-session-token", buyer_identity: buyer_identity, store_id: store_id,
+                                                       product_id: product_id, purpose: purpose,
+                                                       idempotency_key: idempotency_key)
       end
 
       # Authenticated checkout: `buyer_identity` (your stable id for the customer) goes into a
       # session token, which Waffo uses for trial eligibility and the customer portal. The
-      # token is appended to the checkout URL as a fragment (`#token=...`).
+      # token is appended to the checkout URL as a fragment (`#token=...`). `idempotency_key`
+      # applies to the session only: a token is short-lived and cheap to issue again.
       def create_authenticated_checkout(product_id:, currency:, buyer_identity:, **params)
         token = issue_session_token(buyer_identity: buyer_identity, product_id: product_id)
         session = create_checkout_session(product_id: product_id, currency: currency, **params)
         session.merge(
           "checkoutUrl" => "#{session.fetch("checkoutUrl")}#token=#{token.fetch("token")}",
+          "token" => token["token"],
+          "tokenExpiresAt" => token["expiresAt"]
+        )
+      end
+
+      # A plan change the customer confirms on Waffo's page. The URL is a bearer credential, like
+      # the one from create_customer_portal_link. Needs a known environment, because a test
+      # session needs `?test=true` before the fragment, and prod must not have it.
+      def create_authenticated_plan_change(origin_order_id:, product_id:, currency:, buyer_identity:, **params)
+        environment = Requests.environment!(@environment)
+        token = issue_session_token(buyer_identity: buyer_identity, product_id: product_id)
+        session = create_plan_change_session(origin_order_id: origin_order_id, product_id: product_id,
+                                             currency: currency, **params)
+        url = session.fetch("checkoutUrl")
+        url = "#{url}#{url.include?("?") ? "&" : "?"}test=true" if environment == "test"
+        session.merge(
+          "checkoutUrl" => "#{url}#token=#{token.fetch("token")}",
           "token" => token["token"],
           "tokenExpiresAt" => token["expiresAt"]
         )
@@ -128,21 +162,6 @@ module Waffo
 
       # --- Orders ------------------------------------------------------------------------
 
-      # pending → canceled at once; active, trialing and past_due → canceling, ending with the
-      # paid period. The terminal `canceled` arrives later as a webhook.
-      def cancel_subscription(order_id)
-        action("/v1/actions/subscription-order/cancel-order", { order_id: order_id })
-      end
-
-      # Undoes a cancellation while the order is still `canceling`.
-      def reactivate_subscription(order_id)
-        action("/v1/actions/subscription-order/reactivate-order", { order_id: order_id })
-      end
-
-      def cancel_onetime_order(order_id)
-        action("/v1/actions/onetime-order/cancel-order", { order_id: order_id })
-      end
-
       # Nil when Waffo knows no such order. `productId` is the order's current product, so a plan
       # change to another product can be told apart.
       def subscription_order(order_id)
@@ -150,37 +169,7 @@ module Waffo
         order && order.merge("productId" => order.dig("subscriptionProduct", "id"))
       end
 
-      # --- Products ----------------------------------------------------------------------
-
-      # prices: { "USD" => { amount: "9.99", taxCategory: "saas" } }
-      def create_subscription_product(store_id:, name:, billing_period:, prices:, **params)
-        action("/v1/actions/subscription-product/create-product",
-               { store_id: store_id, name: name, billing_period: billing_period, prices: prices, **params })
-      end
-
-      def update_subscription_product(id:, **params)
-        action("/v1/actions/subscription-product/update-product", { id: id, **params })
-      end
-
-      # Copies the test version to production (first publish only).
-      def publish_subscription_product(id:)
-        action("/v1/actions/subscription-product/publish-product", { id: id })
-      end
-
-      def create_onetime_product(store_id:, name:, prices:, **params)
-        action("/v1/actions/onetime-product/create-product", { store_id: store_id, name: name, prices: prices, **params })
-      end
-
-      # --- Webhook endpoints -------------------------------------------------------------
-
-      def add_webhook(store_id:, url:, events:, test_mode:, channel: "http", **params)
-        action("/v1/actions/store/add-webhook",
-               { store_id: store_id, channel: channel, url: url, events: events, test_mode: test_mode, **params })
-      end
-
-      def remove_webhook(id:)
-        action("/v1/actions/store/remove-webhook", { id: id })
-      end
+      # --- Webhook deliveries ------------------------------------------------------------
 
       # Delivery records, newest first, for the API key's environment: id, eventType, eventId,
       # payload, webhookUrl, status (pending / success / failed), httpStatus, responseBody,
@@ -205,25 +194,6 @@ module Waffo
         graphql(query, storeId: require_store_id(store_id))&.fetch("webhookDeliveriesCount", nil)
       end
 
-      # --- Low level ---------------------------------------------------------------------
-
-      # Returns `data`. Raises when the response carries `errors` and no data.
-      def graphql(query, variables = {})
-        status, envelope = request("/v1/graphql", { "query" => query, "variables" => variables })
-        raise_for(status, envelope, "/v1/graphql") if present?(envelope["errors"]) && envelope["data"].nil?
-
-        envelope["data"]
-      end
-
-      # Any action endpoint. Returns the envelope's `data`; raises Rejected or Unavailable on
-      # `errors` or a non-2xx status.
-      def action(path, params)
-        status, envelope = request(path, camelize(params))
-        raise_for(status, envelope, path) if present?(envelope["errors"]) || !(200..299).cover?(status)
-
-        envelope["data"] || {}
-      end
-
       # A Ruby value as a GraphQL input literal: hashes as input objects, symbols and times as strings.
       def self.graphql_literal(value)
         case value
@@ -243,6 +213,18 @@ module Waffo
       end
 
       private
+        attr_reader :connection
+
+        def auth_headers(path, json)
+          timestamp = Time.now.to_i.to_s
+          {
+            "X-Merchant-Id" => @merchant_id,
+            "X-Timestamp" => timestamp,
+            "X-Signature" => self.class.sign(method: "POST", path: path, timestamp: timestamp, body: json,
+                                             private_key: @private_key)
+          }
+        end
+
         def delivery_filter(status, event_type, filter)
           if status && !WEBHOOK_DELIVERY_STATUSES.include?(status.to_s)
             raise ArgumentError, "status must be one of #{WEBHOOK_DELIVERY_STATUSES.join(", ")}"
@@ -259,79 +241,6 @@ module Waffo
 
           store_id
         end
-
-        def request(path, params)
-          json = JSON.generate(params)
-          timestamp = Time.now.to_i.to_s
-          headers = {
-            "Content-Type" => "application/json",
-            "X-Merchant-Id" => @merchant_id,
-            "X-Timestamp" => timestamp,
-            "X-Signature" => self.class.sign(method: "POST", path: path, timestamp: timestamp, body: json,
-                                             private_key: @private_key)
-          }
-
-          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          status, body = instrument("request.waffo_pancake", method: "POST", path: path) do |payload|
-            call_transport(URI("#{@base_url}#{path}"), headers, json).tap { |answer| payload[:status] = answer.first }
-          end
-          elapsed = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(2)
-          @logger&.info("[Waffo] POST #{path} status=#{status.inspect} in #{elapsed}s")
-
-          raise Unavailable.new("Waffo #{path} unreachable: #{body}", status: nil) if status.nil?
-
-          envelope = parse(body)
-          raise_for(status, {}, path, "non-JSON response") unless envelope.is_a?(Hash)
-
-          [status, envelope]
-        end
-
-        def instrument(name, payload, &block)
-          return yield(payload) unless @instrumenter
-
-          @instrumenter.instrument(name, payload, &block)
-        end
-
-        def call_transport(uri, headers, json)
-          @transport.call(uri, headers, json)
-        rescue *NETWORK_ERRORS => e
-          [nil, "#{e.class}: #{e.message}"]
-        end
-
-        def http_post(uri, headers, json)
-          request = Net::HTTP::Post.new(uri, headers)
-          request.body = json
-          response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: @timeout,
-                                     read_timeout: @timeout, write_timeout: @timeout) do |http|
-            http.request(request)
-          end
-          [response.code.to_i, response.body]
-        end
-
-        def raise_for(status, envelope, path, fallback = "request failed")
-          errors = Array(envelope["errors"])
-          message = errors.map { |e| e.is_a?(Hash) ? e["message"] : e.to_s }.compact.first || fallback
-          error = status.nil? || status == 429 || status >= 500 ? Unavailable : Rejected
-          raise error.new("Waffo #{path} status=#{status}: #{message}", status: status, errors: errors)
-        end
-
-        def parse(body)
-          JSON.parse(body.to_s)
-        rescue JSON::ParserError
-          nil
-        end
-
-        def camelize(params)
-          params.each_with_object({}) do |(key, value), out|
-            next if value.nil?
-
-            out[key.to_s.gsub(/_([a-z\d])/) { Regexp.last_match(1).upcase }] = value
-          end
-        end
-
-        def blank?(value) = value.nil? || value.to_s.strip.empty?
-
-        def present?(value) = !(value.nil? || (value.respond_to?(:empty?) && value.empty?))
     end
   end
 end

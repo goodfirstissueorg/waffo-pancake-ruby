@@ -100,12 +100,14 @@ settings: the portal's return button links only there.
 
 ```ruby
 client.cancel_subscription("ORD_...")      # => {"orderId" => "ORD_...", "status" => "canceling"}
-client.reactivate_subscription("ORD_...")  # while still canceling
 client.subscription_order("ORD_...")       # GraphQL; nil when unknown
 # => {"status" => "active", "currentPeriodEnd" => "2027-10-08T...", "merchantProvidedBuyerIdentity" => "user-42", ...}
 ```
 
 `canceling` keeps access until `currentPeriodEnd`. The terminal `canceled` arrives as a webhook.
+
+Waffo's gateway refuses an API key on `reactivate_subscription` and `cancel_onetime_order` with
+a 401. Call them as the customer; see [Customer sessions](#customer-sessions).
 
 ## Products
 
@@ -119,11 +121,102 @@ client.publish_subscription_product(id: "PROD_...")  # test → prod, first publ
 
 Amounts are display strings (`"9.99"`), not cents.
 
-## GraphQL and other endpoints
+## Stores, coupons and refunds
 
 ```ruby
-client.graphql("query ($id: String!) { onetimeOrder(id: $id) { id status } }", id: "ORD_...")
-client.action("/v1/actions/refund-ticket/create-ticket", { payment_id: "PAY_...", reason: "..." })
+client.create_store(name: "My Store")
+client.update_store(id: "STO_...", logo: Waffo::Pancake::NULL)   # NULL clears a field; nil is dropped
+
+client.update_onetime_product_status(id: "PROD_...", status: "inactive")
+client.create_subscription_product_group(store_id: "STO_...", name: "Plans", product_ids: ["PROD_..."])
+
+client.update_webhook(id: webhook["id"], url: "https://example.com/hooks/waffo")
+client.add_notification_recipient(store_id: "STO_...", email: "ops@example.com")
+client.add_store_merchant(store_id: "STO_...", email: "ada@example.com", role: "member")
+
+coupon = client.create_coupon(store_id: "STO_...", name: "Launch", discount: { type: "percentage", percentOff: 20 })
+client.generate_promotion_codes(coupon_id: "CPN_...", count: 100, prefix: "LAUNCH")
+
+client.create_refund_ticket(payment_id: "PAY_...", reason: "Duplicate charge",
+                            requested_amount: { amount: "9.99", currency: "USD" })
+client.scan_prompt(prompt: "...")
+```
+
+Every action takes `idempotency_key:` (1 to 256 characters of `A-Z a-z 0-9 _ -`). It is sent as
+`X-Idempotency-Key`, and Waffo keeps the answer for 24 hours. Nothing is sent unless you pass one:
+
+```ruby
+client.create_refund_ticket(..., idempotency_key: "refund-#{order.id}")
+```
+
+When Waffo sends warnings with a successful answer, the result has a `"warnings"` key.
+
+## Customer sessions
+
+Some routes act as one customer and take a session token instead of an API key. A token does not
+carry an environment, so the session needs one, from `environment:` or the configuration.
+
+```ruby
+token = client.issue_session_token(buyer_identity: "user-42", store_id: "STO_...")["token"]
+customer = client.customer(token, environment: "test")
+
+customer.reactivate_subscription("ORD_...")
+customer.cancel_onetime_order("ORD_...")
+customer.create_onetime_order(checkout_session_id: "cs_...", billing_detail: { country: "US", ... },
+                              language: "en", buyer_email: "ada@example.com")
+# create_subscription_order takes the same arguments. buyer_email: is required unless the checkout
+# session already has one.
+customer.graphql("{ onetimeOrders { id status } }")
+```
+
+`inspect` hides the token. A plan change the customer confirms on Waffo's page:
+
+```ruby
+link = client.create_authenticated_plan_change(origin_order_id: "ORD_...", product_id: "PROD_...",
+                                               currency: "USD", buyer_identity: "user-42")
+redirect_to link["checkoutUrl"], allow_other_host: true   # a bearer credential: never log it
+```
+
+Anonymous checkout with only the public store slug, which needs no secret:
+
+```ruby
+storefront = Waffo::Pancake::StoreCheckout.new(store_slug: "my-store", environment: "test")
+storefront.create_checkout_session(product_id: "PROD_...", currency: "USD")
+```
+
+## Reading data
+
+```ruby
+client.onetime_products(limit: 20)                     # store_id: defaults to WAFFO_STORE_ID
+client.onetime_products(store_slug: "my-store")
+client.onetime_products_count
+client.onetime_product("PROD_...")                     # nil when unknown
+client.payments(filter: { status: { eq: "succeeded" } }, order_by: :created_at_desc, offset: 20)
+client.promotion_codes(coupon_id: "CPN_...")
+client.subscription_product_versions("PROD_...")
+client.me
+```
+
+There are readers for stores, merchants, store merchants, products, product groups, orders,
+payments, refunds, refund tickets, chargebacks, customers, coupons, promotion codes, discount
+applications, email deliveries, cancel reasons, webhooks and notification recipients.
+`Waffo::Pancake::API::Queries::LISTS` is the full table. `fields:` replaces the default selection.
+It is written into the query, so it must come from your code and never from a request. Filters
+travel as GraphQL variables, so they are safe for any value.
+
+Analytics return the fields you ask for, and aggregates can group by a dimension:
+
+```ruby
+client.order_statistics(fields: "totalCount buyerMetrics { totalBuyers }",
+                        start_date: 1.month.ago, end_date: Time.now, currency: "USD")
+client.payments_aggregate(group_by: :status, granularity: :month, filter: { currency: { eq: "USD" } })
+```
+
+Anything else goes through the low-level calls:
+
+```ruby
+client.graphql("query ($id: String!) { payoutTicket(id: $id) { id status } }", id: "...")
+client.action("/v1/actions/some-group/some-action", { some_param: "..." })
 ```
 
 ## Webhooks
@@ -302,14 +395,15 @@ end
 
 `FakeClient` answers `subscription_order` from the orders it was given, moves an order to
 `canceling` / `active` on cancel / reactivate, records every call in `calls`, and raises
-`fail_with` when set.
+`fail_with` when set. It has every API method: lists answer `[]`, counts `0`, reads `nil` and
+writes `{}`. `customer(token)` answers with the same fake.
 
 ## Errors
 
 | Class | When |
 |---|---|
 | `Waffo::Pancake::Rejected` | Waffo refused the request (4xx other than 429). `status` and `errors` carry the details. |
-| `Waffo::Pancake::Unavailable` | Network failure, timeout, 429 or 5xx. Worth retrying later. |
+| `Waffo::Pancake::Unavailable` | Network failure, timeout, 429 or 5xx. Worth retrying later, after `retry_after` seconds when it is set. |
 | `Waffo::Pancake::ConfigurationError` | Missing merchant id, or a key that does not parse. |
 | `Waffo::Pancake::InvalidSignature` | A webhook that does not verify. |
 
@@ -318,7 +412,7 @@ All inherit from `Waffo::Pancake::Error`.
 ## Testing your code
 
 `Client.new` takes a `transport:` callable that replaces the HTTP call. It receives the URI,
-the headers and the JSON body and returns `[status, body]`.
+the headers and the JSON body and returns `[status, body]` or `[status, body, headers]`.
 
 ```ruby
 transport = ->(uri, headers, json) { [200, '{"data":{"orderId":"ORD_1","status":"canceling"}}'] }
@@ -333,6 +427,17 @@ Test cards: `4576 7500 0000 0110` succeeds and `4576 7500 0000 0220` is declined
 bundle install
 bundle exec rake test        # test:core (no Rails loaded) and test:rails
 ```
+
+`rake test:live` calls the real API. It needs a **test-mode** key and refuses to run otherwise:
+
+```sh
+WAFFO_LIVE=1 WAFFO_ENVIRONMENT=test WAFFO_MERCHANT_ID=... WAFFO_PRIVATE_KEY=... WAFFO_STORE_ID=... \
+  bundle exec rake test:live
+```
+
+`WAFFO_STORE_ID` is only read. Writes go to a temporary store that the run creates and deletes.
+The `Live API` workflow runs this on pushes to `main` and by hand, from the `WAFFO_*` Actions
+secrets. It never runs for pull requests, so a fork cannot reach the key.
 
 Releases are published to RubyGems by the `Release` workflow when a `v*` tag is pushed (see
 [RELEASING.md](RELEASING.md)). It uses

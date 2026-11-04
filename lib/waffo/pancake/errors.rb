@@ -3,14 +3,16 @@
 module Waffo
   module Pancake
     # Base class. `status` is the HTTP status (nil when the request never got an answer) and
-    # `errors` the envelope's `errors` array, as Waffo sent it.
+    # `errors` the envelope's `errors` array, as Waffo sent it. `retry_after` is the seconds from
+    # the Retry-After header, nil when Waffo sent none.
     class Error < StandardError
-      attr_reader :status, :errors
+      attr_reader :status, :errors, :retry_after
 
-      def initialize(message = nil, status: nil, errors: [])
+      def initialize(message = nil, status: nil, errors: [], retry_after: nil)
         super(message)
         @status = status
         @errors = errors
+        @retry_after = retry_after
       end
     end
 

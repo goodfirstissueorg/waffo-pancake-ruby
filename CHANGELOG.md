@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.0
+
+- Every endpoint in Waffo's API reference now has a method:
+  - Stores: `create_store`, `update_store`, `delete_store`.
+  - Store members: `add_store_merchant`, `remove_store_merchant`, `update_store_merchant_role`.
+  - Webhooks: `update_webhook`.
+  - Notification recipients: `add_notification_recipient`, `update_notification_recipient`,
+    `remove_notification_recipient`.
+  - Products: `update_onetime_product`, `publish_onetime_product`,
+    `update_onetime_product_status`, `update_subscription_product_status`.
+  - Product groups: `create_subscription_product_group`, `update_…`, `delete_…`, `publish_…`.
+  - Promotions: `create_coupon`, `update_coupon`, `deactivate_coupon`, `create_promotion_code`,
+    `generate_promotion_codes`, `deactivate_promotion_code`.
+  - Refund tickets: `create_refund_ticket`, `resubmit_refund_ticket`.
+  - Plan changes: `create_plan_change_session`, `create_authenticated_plan_change`.
+  - Content safety: `scan_prompt`.
+- `Client#customer(token, environment:)` returns a `CustomerSession`, authenticated with a session
+  token, with the customer actions plus `create_onetime_order` and `create_subscription_order`.
+- `StoreCheckout.new(store_slug:, environment:)` for anonymous checkout with only the store slug.
+- GraphQL readers, generated from the schema that introspection reports: lists, `*_count` and
+  single-record methods, `*_aggregate` methods and analytics methods. Filters travel as typed
+  variables.
+- `idempotency_key:` on every action, sent as `X-Idempotency-Key`.
+- `Waffo::Pancake::NULL` sends an explicit JSON null, which clears a field. A nil is still dropped.
+- `Error#retry_after`, from the `Retry-After` header.
+- An action's result has a `"warnings"` key when Waffo sent warnings.
+- `Client.new(environment:)`, defaulting to the configured environment.
+- `TestHelpers::FakeClient` has every API method, generated, so a new endpoint cannot be missing.
+- Changed: `graphql` now raises on a non-2xx status without `errors`. It used to return nil.
+- Known: with an API key, `reactivate_subscription` and `cancel_onetime_order` get a 401 from
+  Waffo's gateway. Call them through `client.customer(token)`.
+- `rake test:live` runs the real API with a test-mode key. It is not part of `rake test`.
+
 ## 0.3.0
 
 - Webhook amount fields (Waffo, 2026-09-20 to 2026-09-22):

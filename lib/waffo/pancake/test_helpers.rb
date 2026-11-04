@@ -115,13 +115,13 @@ module Waffo
             "expiresAt" => (Time.now + 2700).utc.iso8601 }
         end
 
-        def cancel_subscription(order_id)
-          record(:cancel_subscription, order_id)
+        def cancel_subscription(order_id, **params)
+          record(:cancel_subscription, order_id, *optional(params))
           change_status(order_id, "canceling")
         end
 
-        def reactivate_subscription(order_id)
-          record(:reactivate_subscription, order_id)
+        def reactivate_subscription(order_id, **params)
+          record(:reactivate_subscription, order_id, *optional(params))
           change_status(order_id, "active")
         end
 
@@ -130,18 +130,40 @@ module Waffo
           {}
         end
 
-        def action(path, params)
-          record(:action, path, params)
+        def action(path, params = {}, **named)
+          record(:action, path, params.merge(named))
           {}
         end
 
+        # Recorded, then answers as this same fake, so a test reads every call from one list.
+        def customer(token, **options)
+          record(:customer, token, *optional(options))
+          self
+        end
+
         def called?(name) = calls.any? { |call| call.first == name }
+
+        # Every other API method records its call and answers empty, so a new endpoint cannot be
+        # missing from the fake. Lists answer [], counts 0, reads nil, writes {}.
+        answers = API::Queries.empty_answers.merge(webhook_deliveries_count: 0)
+        api_methods = [API::CustomerActions, API::StoreActions, API::ProductActions, API::PromotionActions,
+                       API::Queries].flat_map(&:public_instance_methods)
+        client_only = %i[issue_session_token create_authenticated_plan_change webhook_deliveries_count
+                         create_onetime_order create_subscription_order]
+        (api_methods + client_only).uniq.reject { |name| method_defined?(name) }.each do |name|
+          define_method(name) do |*arguments, **params|
+            record(name, *arguments, *optional(params))
+            answers.fetch(name, {})
+          end
+        end
 
         private
           def record(name, *arguments)
             calls << [name, *arguments]
             raise fail_with if fail_with
           end
+
+          def optional(params) = params.empty? ? [] : [params]
 
           def change_status(order_id, status)
             @orders[order_id.to_s]&.merge!("status" => status)
