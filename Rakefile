@@ -14,6 +14,12 @@ namespace :test do
     t.libs << "test" << "lib"
     t.test_files = FileList["test/rails/**/*_test.rb"]
   end
+
+  # Calls the real API with a test-mode key. Not part of `rake test`: see test/live/live_helper.rb.
+  Rake::TestTask.new(:live) do |t|
+    t.libs << "test" << "lib"
+    t.test_files = FileList["test/live/**/*_test.rb"]
+  end
 end
 
 desc "Run the core and the Rails integration tests"
